@@ -28,7 +28,7 @@ public class TracingApiApplication {
     private static CuratorClient curatorClient;
     private static CassandraConnector cassandraConnector;
     private static MetricsCollector metricsCollector;
-    private static CassandraTracingReader cassandraTracingReader;
+    private static TracingReader tracingReader;
 
     public static void main(String[] args) {
         long start = System.currentTimeMillis();
@@ -44,7 +44,7 @@ public class TracingApiApplication {
             Properties contextProperties = PropertiesUtil.ofScope(properties, Scopes.CONTEXT);
             Properties metricsProperties = PropertiesUtil.ofScope(properties, Scopes.METRICS);
 
-            ApplicationContextHolder.init("Hercules timeline API", "timeline-api", contextProperties);
+            ApplicationContextHolder.init("Hercules tracing API", "tracing-api", contextProperties);
 
             curatorClient = new CuratorClient(curatorProperties);
             curatorClient.start();
@@ -52,7 +52,7 @@ public class TracingApiApplication {
             cassandraConnector = new CassandraConnector(cassandraProperties);
             cassandraConnector.connect();
 
-            cassandraTracingReader = new CassandraTracingReader(cassandraConnector);
+            tracingReader = new TracingReader(cassandraConnector);
 
             metricsCollector = new MetricsCollector(metricsProperties);
             metricsCollector.start();
@@ -60,12 +60,12 @@ public class TracingApiApplication {
 
             server = new HttpServer(
                 httpServerProperties,
-                new GetTraceHandler(cassandraTracingReader),
+                new GetTraceHandler(tracingReader),
                 metricsCollector
             );
             server.start();
         } catch (Throwable t) {
-            LOGGER.error("Error on starting timeline api", t);
+            LOGGER.error("Error on starting Tracing API", t);
             shutdown();
             return;
         }
@@ -114,6 +114,6 @@ public class TracingApiApplication {
             //TODO: Process error
         }
 
-        LOGGER.info("Finished Stream API shutdown for {} millis", System.currentTimeMillis() - start);
+        LOGGER.info("Finished Tracing API shutdown for {} millis", System.currentTimeMillis() - start);
     }
 }

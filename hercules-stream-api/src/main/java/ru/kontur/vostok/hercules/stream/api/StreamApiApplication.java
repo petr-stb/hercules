@@ -1,5 +1,6 @@
 package ru.kontur.vostok.hercules.stream.api;
 
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.kontur.vostok.hercules.auth.AuthManager;
@@ -10,11 +11,13 @@ import ru.kontur.vostok.hercules.configuration.util.PropertiesUtil;
 import ru.kontur.vostok.hercules.curator.CuratorClient;
 import ru.kontur.vostok.hercules.health.CommonMetrics;
 import ru.kontur.vostok.hercules.health.MetricsCollector;
+import ru.kontur.vostok.hercules.kafka.util.serialization.VoidDeserializer;
 import ru.kontur.vostok.hercules.meta.stream.StreamRepository;
 import ru.kontur.vostok.hercules.util.application.ApplicationContextHolder;
 
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 
 public class StreamApiApplication {
@@ -23,7 +26,7 @@ public class StreamApiApplication {
 
     private static HttpServer server;
     private static CuratorClient curatorClient;
-    private static StreamReader streamReader;
+    private static ConsumerPool<Void, byte[]> consumerPool;
     private static AuthManager authManager;
     private static MetricsCollector metricsCollector;
 
@@ -46,19 +49,29 @@ public class StreamApiApplication {
             curatorClient = new CuratorClient(curatorProperties);
             curatorClient.start();
 
-            streamReader = new StreamReader(consumerProperties, new StreamRepository(curatorClient));
+            consumerPool = new ConsumerPool<>(consumerProperties, new VoidDeserializer(), new ByteArrayDeserializer());
+            consumerPool.start();
+
+            StreamRepository repository = new StreamRepository(curatorClient);
+
+            metricsCollector = new MetricsCollector(metricsProperties);
+            metricsCollector.start();
+
+            StreamReader streamReader = new StreamReader(
+                    PropertiesUtil.ofScope(properties, "stream.api.reader"),
+                    consumerPool,
+                    metricsCollector);
 
             authManager = new AuthManager(curatorClient);
             authManager.start();
 
-            metricsCollector = new MetricsCollector(metricsProperties);
-            metricsCollector.start();
             CommonMetrics.registerCommonMetrics(metricsCollector);
 
             server = new HttpServer(
                     httpServerProperties,
                     authManager,
-                    new ReadStreamHandler(streamReader, authManager),
+                    new ReadStreamHandler(streamReader, authManager, repository),
+                    new SeekToEndHandler(authManager, repository, consumerPool),
                     metricsCollector
             );
             server.start();
@@ -100,29 +113,22 @@ public class StreamApiApplication {
             LOGGER.error("Error on stopping metrics collector");
             //TODO: Process error
         }
+
+        try {
+            if (consumerPool != null) {
+                consumerPool.stop(5_000, TimeUnit.MILLISECONDS);
+            }
+        } catch (Throwable t) {
+            LOGGER.error("Error on stopping consumer pool", t);
+            //TODO: Process error
+        }
+
         try {
             if (curatorClient != null) {
                 curatorClient.stop();
             }
         } catch (Throwable t) {
             LOGGER.error("Error on stopping curator client", t);
-            //TODO: Process error
-        }
-
-        try {
-            if (authManager != null) {
-                authManager.stop();
-            }
-        } catch (Throwable t) {
-            LOGGER.error("Error on stopping auth manager", t);
-        }
-
-        try {
-            if (streamReader != null) {
-                streamReader.stop();
-            }
-        } catch (Throwable t) {
-            LOGGER.error("Error on stopping stream reader", t);
             //TODO: Process error
         }
 

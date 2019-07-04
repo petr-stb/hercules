@@ -1,19 +1,18 @@
 package ru.kontur.vostok.hercules.timeline.api;
 
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.ResultSet;
+import com.datastax.oss.driver.api.core.cql.Row;
+import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.kontur.vostok.hercules.cassandra.util.CassandraConnector;
 import ru.kontur.vostok.hercules.meta.timeline.TimeTrapUtil;
 import ru.kontur.vostok.hercules.meta.timeline.Timeline;
-import ru.kontur.vostok.hercules.meta.timeline.TimelineUtil;
 import ru.kontur.vostok.hercules.partitioner.LogicalPartitioner;
 import ru.kontur.vostok.hercules.protocol.TimelineByteContent;
-import ru.kontur.vostok.hercules.protocol.TimelineState;
 import ru.kontur.vostok.hercules.protocol.TimelineSliceState;
+import ru.kontur.vostok.hercules.protocol.TimelineState;
 import ru.kontur.vostok.hercules.protocol.util.EventUtil;
 import ru.kontur.vostok.hercules.util.bytes.ByteUtil;
 import ru.kontur.vostok.hercules.util.time.TimeUtil;
@@ -124,43 +123,43 @@ public class TimelineReader {
 
     private static final String SELECT_EVENTS = "" +
             "SELECT" +
-            "  event_id," +
-            "  payload" +
+            " event_id," +
+            " payload" +
             " " +
             "FROM" +
-            "  %s" +
+            " %s" +
             " " +
             "WHERE" +
-            "  slice = %d AND" +
-            "  tt_offset = %d AND" +
-            "  event_id > %s AND" + // Lower bound
-            "  event_id < %s" + // Upper bound
+            " slice = %d AND" +
+            " tt_offset = %d AND" +
+            " event_id > %s AND" + // Lower bound
+            " event_id < %s" + // Upper bound
             " " +
-            "ORDER BY " +
-            "  event_id" +
+            "ORDER BY" +
+            " event_id" +
             " " +
             "LIMIT %d;";
 
     private static final String SELECT_EVENTS_START_READING_SLICE = "" +
             "SELECT" +
-            "  event_id," +
-            "  payload" +
+            " event_id," +
+            " payload" +
             " " +
             "FROM" +
-            "  %s" +
+            " %s" +
             " " +
             "WHERE" +
-            "  slice = %d AND" +
-            "  tt_offset = %d AND" +
-            "  event_id >= %s AND" + // Lower bound
-            "  event_id < %s" + // Upper bound
+            " slice = %d AND" +
+            " tt_offset = %d AND" +
+            " event_id >= %s AND" + // Lower bound
+            " event_id < %s" + // Upper bound
             " " +
-            "ORDER BY " +
-            "  event_id" +
+            "ORDER BY" +
+            " event_id" +
             " " +
             "LIMIT %d;";
 
-    private final Session session;
+    private final CqlSession session;
 
     public TimelineReader(CassandraConnector connector) {
         this.session = connector.session();
@@ -211,15 +210,14 @@ public class TimelineReader {
                 offset = offsetMap.get(params.slice);
             }
 
-            SimpleStatement statement = generateStatement(timeline, params, offset, take);
-            statement.setFetchSize(Integer.MAX_VALUE); // fetch size defined by 'take' parameter
+            SimpleStatement statement = generateStatement(timeline, params, offset, take, from, to);
 
             LOGGER.info("Executing '{}'", statement.toString());
 
             ResultSet rows = session.execute(statement);
             for (Row row : rows) {
-                offset.eventId = ByteUtil.fromByteBuffer(row.getBytes(EVENT_ID));
-                result.add(row.getBytes(PAYLOAD).array());
+                offset.eventId = ByteUtil.fromByteBuffer(row.getByteBuffer(EVENT_ID));
+                result.add(row.getByteBuffer(PAYLOAD).array());
                 --take;
             }
             // If no rows were fetched increment tt_offset to mark partition (slice, offset_id) as red
@@ -243,27 +241,27 @@ public class TimelineReader {
         return new TimelineShardReadStateOffset(ttOffset, NIL);
     }
 
-    private static SimpleStatement generateStatement(Timeline timeline, Parameters params, TimelineShardReadStateOffset offset, int take) {
+    private static SimpleStatement generateStatement(Timeline timeline, Parameters params, TimelineShardReadStateOffset offset, int take, long from, long to) {
         if (!isNil(offset.eventId)) {
-            return new SimpleStatement(String.format(
+            return SimpleStatement.builder(String.format(
                     SELECT_EVENTS,
                     timeline.getName(),
                     params.slice,
                     params.ttOffset,
                     EventUtil.eventIdOfBytesAsHexString(offset.eventId),
-                    EventUtil.minEventIdForTimestampAsHexString(TimeUtil.millisToTicks(params.ttOffset + timeline.getTimetrapSize())),
+                    EventUtil.minEventIdForTimestampAsHexString(Math.min(to, TimeUtil.millisToTicks(params.ttOffset + timeline.getTimetrapSize()))),
                     take
-            ));
+            )).setPageSize(take).build();
         } else {
-            return new SimpleStatement(String.format(
+            return SimpleStatement.builder(String.format(
                     SELECT_EVENTS_START_READING_SLICE,
                     timeline.getName(),
                     params.slice,
                     params.ttOffset,
-                    EventUtil.minEventIdForTimestampAsHexString(TimeUtil.millisToTicks(params.ttOffset)),
-                    EventUtil.minEventIdForTimestampAsHexString(TimeUtil.millisToTicks(params.ttOffset + timeline.getTimetrapSize())),
+                    EventUtil.minEventIdForTimestampAsHexString(Math.max(from, TimeUtil.millisToTicks(params.ttOffset))),
+                    EventUtil.minEventIdForTimestampAsHexString(Math.min(to, TimeUtil.millisToTicks(params.ttOffset + timeline.getTimetrapSize()))),
                     take
-            ));
+            )).setPageSize(take).build();
         }
     }
 

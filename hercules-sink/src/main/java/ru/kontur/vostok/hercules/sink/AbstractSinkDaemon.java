@@ -1,6 +1,5 @@
 package ru.kontur.vostok.hercules.sink;
 
-import com.codahale.metrics.Meter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.kontur.vostok.hercules.configuration.PropertiesLoader;
@@ -21,7 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Base implementation of Sink daemon. Uses pool of SimpleSink for concurrent processing.
+ * Base implementation of Sink daemon. Uses pool of SenderSink for concurrent processing.
  *
  * @author Gregory Koshelev
  */
@@ -42,7 +41,7 @@ public abstract class AbstractSinkDaemon {
         try {
             Map<String, String> parameters = ArgsParser.parse(args);
 
-            Properties properties = PropertiesLoader.load(parameters.getOrDefault("application.properties", "file://applicationProperties"));
+            Properties properties = PropertiesLoader.load(parameters.getOrDefault("application.properties", "file://application.properties"));
 
             Properties contextProperties = PropertiesUtil.ofScope(properties, Scopes.CONTEXT);
             Properties metricsProperties = PropertiesUtil.ofScope(properties, Scopes.METRICS);
@@ -69,23 +68,15 @@ public abstract class AbstractSinkDaemon {
             int poolSize = Props.POOL_SIZE.extract(sinkProperties);
             this.executor = Executors.newFixedThreadPool(poolSize);//TODO: Provide custom ThreadFactory
 
-            Meter droppedEventsMeter = metricsCollector.meter("droppedEvents");
-            Meter processedEventsMeter = metricsCollector.meter("processedEvents");
-            Meter rejectedEventsMeter = metricsCollector.meter("rejectedEvents");
-            Meter totalEventsMeter = metricsCollector.meter("totalEvents");
-
             this.sinkPool =
                     new SinkPool(
                             poolSize,
-                            () -> new SimpleSink(
+                            () -> new SenderSink(
                                     executor,
                                     daemonId,
                                     sinkProperties,
                                     sender,
-                                    droppedEventsMeter,
-                                    processedEventsMeter,
-                                    rejectedEventsMeter,
-                                    totalEventsMeter));
+                                    metricsCollector));
             sinkPool.start();
         } catch (Throwable throwable) {
             LOGGER.error("Cannot start application due to error", throwable);

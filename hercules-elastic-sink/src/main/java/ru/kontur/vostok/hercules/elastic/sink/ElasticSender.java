@@ -10,13 +10,14 @@ import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.kontur.vostok.hercules.health.AutoMetricStopwatch;
 import ru.kontur.vostok.hercules.health.MetricsCollector;
 import ru.kontur.vostok.hercules.kafka.util.processing.BackendServiceFailedException;
 import ru.kontur.vostok.hercules.protocol.Event;
 import ru.kontur.vostok.hercules.protocol.format.EventFormatter;
 import ru.kontur.vostok.hercules.protocol.util.EventUtil;
 import ru.kontur.vostok.hercules.sink.Sender;
-import ru.kontur.vostok.hercules.sink.SenderStatus;
+import ru.kontur.vostok.hercules.sink.ProcessorStatus;
 import ru.kontur.vostok.hercules.util.functional.Result;
 import ru.kontur.vostok.hercules.util.logging.LoggingConstants;
 import ru.kontur.vostok.hercules.util.parsing.Parsers;
@@ -27,8 +28,11 @@ import ru.kontur.vostok.hercules.util.validation.Validators;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
@@ -57,6 +61,8 @@ public class ElasticSender extends Sender {
     private final Timer elasticsearchRequestTimeTimer;
     private final Meter elasticsearchRequestErrorsMeter;
 
+    private final Set<String> redefinedExceptions;
+
     public ElasticSender(Properties properties, MetricsCollector metricsCollector) {
         super(properties, metricsCollector);
 
@@ -69,6 +75,8 @@ public class ElasticSender extends Sender {
         final int connectionTimeout = Props.CONNECTION_TIMEOUT_MS.extract(properties);
         final int connectionRequestTimeout = Props.CONNECTION_REQUEST_TIMEOUT_MS.extract(properties);
         final int socketTimeout = Props.SOCKET_TIMEOUT_MS.extract(properties);
+
+        this.redefinedExceptions = new HashSet<>(Arrays.asList(Props.REDEFINED_EXCEPTIONS.extract(properties)));
 
         this.restClient = RestClient.builder(hosts)
                 .setMaxRetryTimeoutMillis(retryTimeoutMs)
@@ -93,12 +101,12 @@ public class ElasticSender extends Sender {
     }
 
     @Override
-    public SenderStatus ping() {
+    public ProcessorStatus ping() {
         try {
             Response response = restClient.performRequest("HEAD", "/", Collections.emptyMap());
-            return (200 == response.getStatusLine().getStatusCode()) ? SenderStatus.AVAILABLE : SenderStatus.UNAVAILABLE;
+            return (200 == response.getStatusLine().getStatusCode()) ? ProcessorStatus.AVAILABLE : ProcessorStatus.UNAVAILABLE;
         } catch (Exception e) {
-            return SenderStatus.UNAVAILABLE;
+            return ProcessorStatus.UNAVAILABLE;
         }
     }
 
@@ -125,20 +133,24 @@ public class ElasticSender extends Sender {
             int retryCount = retryLimit;
             boolean needToRetry;
             do {
-                long start = System.currentTimeMillis();
-                Response response = restClient.performRequest(
-                        "POST",
-                        "/_bulk",
-                        Collections.emptyMap(),
-                        body
+                Response response;
+                try (AutoMetricStopwatch requestTime = new AutoMetricStopwatch(elasticsearchRequestTimeTimer, TimeUnit.MILLISECONDS)) {
+                    response = restClient.performRequest(
+                            "POST",
+                            "/_bulk",
+                            Collections.emptyMap(),
+                            body
 
-                );
-                elasticsearchRequestTimeTimer.update(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS);
+                    );
+                } catch (IOException ex) {
+                    elasticsearchRequestErrorsMeter.mark();
+                    throw ex;
+                }
                 if (response.getStatusLine().getStatusCode() != 200) {
                     elasticsearchRequestErrorsMeter.mark();
                     throw new RuntimeException("Bad response");
                 }
-                result = elasticResponseHandler.process(response.getEntity());
+                result = elasticResponseHandler.process(response.getEntity(), redefinedExceptions);
                 if (result.getTotalErrors() != 0) {
                     LOGGER.info(
                             "Error statistics (retryanble/non retyable/unknown/total): {}/{}/{}/{}",
@@ -155,7 +167,7 @@ public class ElasticSender extends Sender {
                         }
                     }
                 }
-                needToRetry = result.hasRetryableErrors() || result.hasUnknownErrors() && retryOnUnknownErrors;
+                needToRetry = result.hasRetryableErrors() || (result.hasUnknownErrors() && retryOnUnknownErrors);
             } while (0 < retryCount-- && needToRetry);
             if (needToRetry) {
                 throw new Exception("Have retryable errors in elasticsearch response");
@@ -253,6 +265,11 @@ public class ElasticSender extends Sender {
         static final PropertyDescription<Boolean> MERGE_PROPERTIES_TAG_TO_ROOT = PropertyDescriptions
                 .booleanProperty("elastic.mergePropertiesTagToRoot")
                 .withDefaultValue(Boolean.FALSE)
+                .build();
+
+        static final PropertyDescription<String[]> REDEFINED_EXCEPTIONS = PropertyDescriptions
+                .arrayOfStringsProperty("elastic.redefinedExceptions")
+                .withDefaultValue(new String[]{})
                 .build();
     }
 }
